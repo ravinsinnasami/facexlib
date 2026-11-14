@@ -1,0 +1,143 @@
+
+name: Copy All Upstream Releases
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  copy-releases:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Copy upstream releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          git remote add upstream https://github.com/xinntao/facexlib.git
+
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import tempfile
+
+          UPSTREAM = "xinntao/facexlib"
+          FORK = os.environ["GITHUB_REPOSITORY"]
+
+          def run(args, check=True):
+              return subprocess.run(args, check=check)
+
+          def output(args):
+              return subprocess.check_output(args, text=True).strip()
+
+          def flatten(items):
+              for item in items:
+                  if isinstance(item, list):
+                      yield from flatten(item)
+                  else:
+                      yield item
+
+          print("Retrieving all upstream releases...")
+
+          raw = output([
+              "gh", "api", "--paginate", "--slurp",
+              f"repos/{UPSTREAM}/releases"
+          ])
+
+          releases = list(flatten(json.loads(raw)))
+
+          print(f"Found {len(releases)} releases.")
+
+          stable_latest_set = False
+
+          for release in releases:
+              tag = release["tag_name"]
+              title = release["name"] or tag
+
+              print(f"\nProcessing {tag}: {title}")
+
+              # Skip releases already copied.
+              existing = run([
+                  "gh", "release", "view", tag,
+                  "--repo", FORK
+              ], check=False)
+
+              if existing.returncode == 0:
+                  print("Already exists. Skipping.")
+                  continue
+
+              # Copy the original Git tag into the fork.
+              remote_tag = output([
+                  "git", "ls-remote", "--exit-code",
+                  "origin", f"refs/tags/{tag}"
+              ]) if run([
+                  "git", "ls-remote", "--exit-code",
+                  "origin", f"refs/tags/{tag}"
+              ], check=False).returncode == 0 else ""
+
+              if not remote_tag:
+                  temp_ref = f"refs/tmp/upstream-tags/{tag}"
+
+                  run([
+                      "git", "fetch", "upstream",
+                      f"+refs/tags/{tag}:{temp_ref}"
+                  ])
+
+                  run([
+                      "git", "push", "origin",
+                      f"{temp_ref}:refs/tags/{tag}"
+                  ])
+
+              with tempfile.TemporaryDirectory() as temp:
+                  assets = release.get("assets", [])
+
+                  if assets:
+                      run([
+                          "gh", "release", "download", tag,
+                          "--repo", UPSTREAM,
+                          "--dir", temp,
+                          "--clobber"
+                      ])
+
+                  notes_path = os.path.join(temp, "release-notes.txt")
+
+                  with open(notes_path, "w", encoding="utf-8") as f:
+                      f.write(release.get("body") or "")
+
+                  args = [
+                      "gh", "release", "create", tag,
+                      "--repo", FORK,
+                      "--title", title,
+                      "--notes-file", notes_path,
+                      "--verify-tag"
+                  ]
+
+                  if release.get("prerelease"):
+                      args.append("--prerelease")
+
+                  if not release.get("prerelease") and not stable_latest_set:
+                      args.append("--latest")
+                      stable_latest_set = True
+                  else:
+                      args.append("--latest=false")
+
+                  for asset in sorted(os.listdir(temp)):
+                      path = os.path.join(temp, asset)
+                      if os.path.isfile(path) and path != notes_path:
+                          args.append(path)
+
+                  run(args)
+
+              print(f"Successfully copied {tag}.")
+
+          print("\nRelease transfer completed!")
+          PY
