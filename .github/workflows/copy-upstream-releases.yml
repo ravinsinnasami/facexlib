@@ -19,7 +19,7 @@ jobs:
 
       - name: Copy upstream releases
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
         shell: bash
         run: |
           git remote add upstream https://github.com/xinntao/facexlib.git
